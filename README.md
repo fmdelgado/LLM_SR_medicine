@@ -1,4 +1,4 @@
-# in Large Language Model Automation of Title and Abstract Screening in Systematic Reviews (SRs) in medicine
+# Large Language Model Automation of Title and Abstract Screening in Systematic Reviews (SRs) in medicine
 
 ## Overview
 This project focuses on the automation of title and abstract screening in systematic reviews (SRs) using Large Language Models (LLMs). We present a comprehensive approach encompassing data preparation, criteria implementation, quality assessment, and final classification analysis for the screening process.
