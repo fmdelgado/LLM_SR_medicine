@@ -24,3 +24,6 @@
 /screener1_oldimplementation.py
 /screener1_oldimplementation (1).py
 /screener_1.py
+/new_analyses/results/.ipynb_checkpoints/
+*.sqlite3
+*.sqlite3
