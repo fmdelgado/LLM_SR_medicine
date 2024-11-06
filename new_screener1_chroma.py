@@ -2,21 +2,17 @@ import os
 import pickle
 import logging
 import json
-import re
 import threading
 import tempfile
 import shutil
 import time
-from typing import Any, TypedDict
 from tqdm import tqdm
 import pandas as pd
 from langchain_community.document_loaders import DataFrameLoader
-from langchain_community.vectorstores import FAISS
-from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
+from langchain_chroma import Chroma
 from langchain.prompts import ChatPromptTemplate
+import asyncio
+from tqdm.asyncio import tqdm_asyncio
 
 
 class Screening1:
@@ -39,6 +35,8 @@ class Screening1:
         else:
             self.logger.setLevel(logging.INFO)
 
+        # logging.basicConfig(level=logging.DEBUG if self.verbose else logging.INFO,
+        #                     format='%(asctime)s %(levelname)s:%(message)s')
 
         if embeddings_path is None:
             self.embeddings_path = os.path.join(self.vector_store_path, "embeddings")
@@ -47,7 +45,10 @@ class Screening1:
 
         self.embeddings_path1 = os.path.join(self.embeddings_path, "screening1_embeddings")
         if not os.path.exists(self.embeddings_path1):
-            os.makedirs(self.embeddings_path1)
+            os.makedirs(self.embeddings_path1, exist_ok=True)
+            os.chmod(self.embeddings_path1, 0o755)  # Read, write, execute for owner; read and execute for others
+        else:
+            os.chmod(self.embeddings_path1, 0o755)  # Read, write, execute for owner; read and execute for others
 
         self.screening1_dir = os.path.join(self.vector_store_path, "screening1")
         if not os.path.exists(self.screening1_dir):
@@ -202,9 +203,6 @@ class Screening1:
         record2answer_attr = 'screening1_record2answer'
         missing_records_attr = 'screening1_missing_records'
 
-        print(f"Loaded {len(getattr(self, record2answer_attr))} existing records for screening1")
-        print(f"Loaded {len(getattr(self, missing_records_attr))} missing records for screening1")
-
         start_time = time.time()
         # Embed the entire dataset
         self.embed_literature_df(path_name=self.embeddings_path1)
@@ -238,67 +236,33 @@ class Screening1:
             if 'uniqueid' not in doc.metadata:
                 doc.metadata['uniqueid'] = doc.page_content_hash  # Or generate a unique ID
 
-        # Check if the index files exist
-        index_file = os.path.join(path_name, "index.faiss")
-        docstore_file = os.path.join(path_name, "index.pkl")
-
-        if os.path.exists(index_file) and os.path.exists(docstore_file):
+        # Check if Chroma collection exists
+        if os.path.exists(os.path.join(path_name, 'chroma.sqlite3')) or \
+                os.path.exists(os.path.join(path_name, 'index')):
             if self.verbose:
-                print('Loading existing FAISS index...')
-            self.db = self.load_FAISS(path_name=path_name)
-            indexed_uniqueids = self.get_indexed_uniqueids()
-        else:
-            if self.verbose:
-                print('No existing FAISS index found. Creating a new one...')
-            # Create the FAISS index
-            self.db = self.docs_to_FAISS(all_docs, path_name)
-            indexed_uniqueids = self.get_indexed_uniqueids()
-            self.validate_index()
-            return self.db  # Since all documents are indexed, we can return here
-
-        # Identify new documents to embed
-        new_docs = [doc for doc in all_docs if doc.metadata.get('uniqueid', '') not in indexed_uniqueids]
-        if new_docs:
-            if self.verbose:
-                print(f'Adding {len(new_docs)} new documents to the index...')
-            # Ensure 'uniqueid' is in metadata
-            for doc in new_docs:
-                if 'uniqueid' not in doc.metadata:
-                    doc.metadata['uniqueid'] = doc.page_content_hash  # Or generate a unique ID
-
-            # Split and embed new documents
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=5000,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
-                chunk_overlap=400,
+                print('Loading existing Chroma index...')
+            self.db = Chroma(
+                collection_name="literature",
+                persist_directory=path_name,
+                embedding_function=self.embeddings
             )
-            splits = text_splitter.split_documents(new_docs)
-
-            # Embed in batches with progress bar
-            batch_size = 100
-            total_batches = len(splits) // batch_size + (1 if len(splits) % batch_size != 0 else 0)
-
-            for i in tqdm(range(total_batches), desc="Embedding new documents"):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, len(splits))
-                batch = splits[start_idx:end_idx]
-                texts = [doc.page_content for doc in batch]
-                try:
-                    batch_embeddings = self.embeddings.embed_documents(texts)
-                    # Add embeddings and documents to the index
-                    self.db.add_embeddings(batch_embeddings, batch)
-                except Exception as e:
-                    for doc in batch:
-                        self.logger.error(f"Error embedding document {doc.metadata.get('uniqueid', 'unknown')}: {e}")
-
-            # Save the updated index
-            self.db.save_local(path_name)
         else:
             if self.verbose:
-                print('No new documents to embed.')
-
-        self.validate_index()
-        return self.db
+                print('No existing Chroma index found. Creating a new one...')
+            # Create the Chroma index
+            self.db = Chroma(
+                collection_name="literature",
+                persist_directory=path_name,
+                embedding_function=self.embeddings
+            )
+            # Embed documents in batches
+            batch_size = 100  # Adjust as needed
+            for i in tqdm(range(0, len(all_docs), batch_size), desc="Embedding documents"):
+                batch_docs = all_docs[i:i + batch_size]
+                texts = [doc.page_content for doc in batch_docs]
+                metadatas = [doc.metadata for doc in batch_docs]
+                self.db.add_texts(texts, metadatas=metadatas)
+            # self.db.persist()
 
     def get_indexed_uniqueids(self):
         uniqueids = set()
@@ -321,22 +285,134 @@ class Screening1:
             self.logger.info("All documents are correctly embedded in the index.")
 
         if extra_uniqueids:
-            self.logger.warning(f"There are {len(extra_uniqueids)} extra documents in the index not present in the dataframe.")
+            self.logger.warning(
+                f"There are {len(extra_uniqueids)} extra documents in the index not present in the dataframe.")
             self.logger.debug(f"Extra uniqueids: {extra_uniqueids}")
 
+    async def process_records_concurrently(self, records_to_process, chain, screening_type):
+        sem = asyncio.Semaphore(5)  # Adjust the concurrency limit as needed
+        success_count = 0
+        failure_count = 0
+
+        record2answer = getattr(self, f"{screening_type}_record2answer")
+        missing_records = getattr(self, f"{screening_type}_missing_records")
+
+        async def sem_task(recnumber):
+            async with sem:
+                recnumber, result = await self.process_single_record_async(recnumber, chain)
+                return recnumber, result
+
+        tasks = [sem_task(recnumber) for recnumber in records_to_process]
+
+        results = []
+        pbar = tqdm_asyncio(total=len(tasks), desc="Processing Records")
+
+        for f in asyncio.as_completed(tasks):
+            recnumber, result = await f
+            results.append((recnumber, result))
+            if result:
+                record2answer[recnumber] = result
+                success_count += 1
+            else:
+                missing_records.add(recnumber)
+                failure_count += 1
+
+            # Update progress bar with current counts
+            pbar.set_postfix({'Success': success_count, 'Failure': failure_count})
+            pbar.update(1)
+
+            # Save after each record to ensure progress is saved
+            self.save_screening_results(screening_type)
+
+        pbar.close()
+        return results
+
     def run_screening(self, screening_type='screening1'):
-        """
-        Orchestrates the screening process, ensuring all records are analyzed.
-        """
-        self.logger.info(f"Starting screening: {screening_type}")
+        # Prepare prompt and other settings
+        self.prompt, self.formatted_criteria, self.json_structure = self.prepare_screening_prompt()
 
-        # Process all records, prioritizing missing_records
-        self.base_screening(screening_type=screening_type, reprocess_missing_first=True)
+        # Load existing screening data
+        self.load_existing_screening_data(screening_type)
+        record2answer = getattr(self, f"{screening_type}_record2answer")
+        missing_records = getattr(self, f"{screening_type}_missing_records")
 
-        # After processing, verify that all unique records have been analyzed
-        self.generate_status_report(screening_type=screening_type)
+        # Determine records to process
+        records_to_process = [rec for rec in self.get_rec_numbers(screening_type) if rec not in record2answer]
 
-        self.logger.info(f"Screening completed: {screening_type}")
+        # If there are no records to process, exit early
+        if not records_to_process:
+            print("All records have been processed. No further action required.")
+            return
+
+        # Create the chain
+        chain = self.prepare_chain()
+
+        # Run the asynchronous processing
+        loop = asyncio.get_event_loop()
+        results = loop.run_until_complete(self.process_records_concurrently(records_to_process, chain, screening_type))
+
+        # Display final summary
+        total_records = len(records_to_process)
+        success_count = len([r for r in results if r[1]])
+        failure_count = len([r for r in results if not r[1]])
+
+        print(f"\nTotal records processed: {total_records}")
+        print(f"Successfully processed: {success_count}")
+        print(f"Failed to process: {failure_count}")
+
+        # Save final results
+        self.save_screening_results(screening_type)
+
+    def run_screening_sync(self, screening_type='screening1'):
+        # Prepare prompt and other settings
+        self.prompt, self.formatted_criteria, self.json_structure = self.prepare_screening_prompt()
+
+        # Load existing screening data
+        self.load_existing_screening_data(screening_type)
+        record2answer = getattr(self, f"{screening_type}_record2answer")
+        missing_records = getattr(self, f"{screening_type}_missing_records")
+
+        # Determine records to process
+        # Prioritize missing_records
+        records_to_process = list(missing_records) + [rec for rec in self.get_rec_numbers(screening_type) if
+                                                      rec not in record2answer and rec not in missing_records]
+
+        # If there are no records to process, exit early
+        if not records_to_process:
+            print("All records have been processed. No further action required.")
+            return
+
+        # Create the chain
+        chain = self.prepare_chain()
+
+        # Initialize counters
+        success_count = 0
+        failure_count = 0
+
+        # Process records synchronously
+        for recnumber in tqdm(records_to_process, desc="Processing Records"):
+            result = self.process_single_record(recnumber, chain)
+            if result:
+                record2answer[recnumber] = result
+                success_count += 1
+            else:
+                missing_records.add(recnumber)
+                failure_count += 1
+
+            # Update progress bar with current counts
+            tqdm.write(f"Record: {recnumber}, Success: {success_count}, Failure: {failure_count}")
+
+            # Save after each record to ensure progress is saved
+            self.save_screening_results(screening_type)
+
+        # Display final summary
+        total_records = len(records_to_process)
+        print(f"\nTotal records processed: {total_records}")
+        print(f"Successfully processed: {success_count}")
+        print(f"Failed to process: {failure_count}")
+
+        # Save final results
+        self.save_screening_results(screening_type)
 
     def generate_status_report(self, screening_type):
         """
@@ -363,17 +439,13 @@ class Screening1:
         return report
 
     def base_screening(self, screening_type, reprocess_missing_first=True):
-        screening_dir = getattr(self, f"{screening_type}_dir")
-        record2answer_attr = f"{screening_type}_record2answer"
-        missing_records_attr = f"{screening_type}_missing_records"
-
         # Load existing screening data
         self.load_existing_screening_data(screening_type)
-        record2answer = getattr(self, record2answer_attr)
-        missing_records = getattr(self, missing_records_attr)
+        record2answer = getattr(self, f"{screening_type}_record2answer")
+        missing_records = getattr(self, f"{screening_type}_missing_records")
 
         # Prepare prompt and other settings
-        prompt, formatted_criteria, json_structure = self.prepare_screening_prompt()
+        self.prompt, self.formatted_criteria, self.json_structure = self.prepare_screening_prompt()
 
         # Determine records to process
         if reprocess_missing_first and missing_records:
@@ -385,34 +457,44 @@ class Screening1:
         total_records = len(records_to_process)
         self.logger.info(f"Total records to process: {total_records}")
 
-        for i, recnumber in enumerate(tqdm(records_to_process, desc=f"{screening_type.capitalize()}")):
-            try:
-                retriever = self.get_retriever(recnumber, screening_type)
-                if retriever is None:
-                    raise ValueError(f"Failed to create retriever for record {recnumber}")
-                chain = self.prepare_chain(retriever, formatted_criteria, json_structure, prompt)
-                result = self.process_single_record(recnumber, chain)
+        # Process records in batches
+        batch_size = 10  # Adjust based on API limits and performance
+        for i in tqdm(range(0, total_records, batch_size), desc=f"{screening_type.capitalize()}"):
+            batch_records = records_to_process[i:i + batch_size]
+            batch_inputs = []
+            for recnumber in batch_records:
+                # Fetch the document directly
+                document_row = self.literature_df[self.literature_df['uniqueid'] == recnumber]
+                if document_row.empty:
+                    self.logger.error(f"No document found for record {recnumber}")
+                    continue
+                document = document_row[self.content_column].iloc[0]
 
-                if result is None:
-                    # Add to missing_records and ensure it's not in record2answer
-                    missing_records.add(recnumber)
-                    record2answer.pop(recnumber, None)
-                    self.logger.warning(f"Failed to process record {recnumber} after multiple attempts.")
-                else:
-                    # Add to record2answer and ensure it's not in missing_records
+                # Prepare the inputs
+                inputs = {
+                    "context": document,
+                    "criteria": self.formatted_criteria,
+                    "json_structure": self.json_structure
+                }
+                batch_inputs.append(inputs)
+
+            # Prepare the chain
+            chain = self.prepare_chain()
+
+            # Invoke the chain in batch
+            results = chain.batch(batch_inputs)
+
+            # Process results
+            for recnumber, result in zip(batch_records, results):
+                if result:
                     record2answer[recnumber] = result
                     missing_records.discard(recnumber)
+                else:
+                    missing_records.add(recnumber)
+                    record2answer.pop(recnumber, None)
 
-                # Periodically save and validate
-                if (i + 1) % 20 == 0 or (i + 1) == total_records:
-                    self.save_screening_results(screening_type)
-                    self.validate_mutual_exclusivity(screening_type)
-
-            except Exception as e:
-                self.logger.error(f"Error processing record {recnumber}: {str(e)}")
-                # Add to missing_records and ensure it's not in record2answer
-                missing_records.add(recnumber)
-                record2answer.pop(recnumber, None)
+            # Periodically save and validate
+            if (i + batch_size) % 50 == 0 or (i + batch_size) >= total_records:
                 self.save_screening_results(screening_type)
                 self.validate_mutual_exclusivity(screening_type)
 
@@ -421,22 +503,72 @@ class Screening1:
         self.validate_mutual_exclusivity(screening_type)
 
     def parse_json_safely(self, json_string):
+        """
+        Parses a JSON string and extracts the criteria evaluations with 'label' and 'reason'.
+
+        Args:
+            json_string (str): The JSON string to parse.
+
+        Returns:
+            dict: A dictionary where each key is a criterion and its value is another dictionary
+                  with 'label' (bool) and 'reason' (str).
+        """
+        import json
+        import re
+
+        # Try parsing the JSON directly
         try:
-            # Attempt to parse the entire content
-            return json.loads(json_string)
+            parsed_json = json.loads(json_string)
         except json.JSONDecodeError:
-            try:
-                # Extract the JSON object from the response using regex
-                json_matches = re.findall(r'\{.*}', json_string, re.DOTALL)
-                if json_matches:
-                    json_data = json_matches[0]
-                    return json.loads(json_data)
-                else:
-                    self.logger.error(f"No JSON found in the response: {json_string}")
-                    return {}  # Return an empty dict if parsing fails
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse JSON after regex extraction: {e}\nResponse was: {json_string}")
+            # If it fails, try extracting JSON using regex
+            json_matches = re.findall(r'\{.*?\}', json_string, re.DOTALL)
+            if json_matches:
+                try:
+                    parsed_json = json.loads(json_matches[0])
+                except json.JSONDecodeError as e:
+                    self.logger.error(
+                        f"Error parsing JSON after regex extraction: {e}\nResponse was: {json_string}")
+                    return {}
+            else:
+                self.logger.error(f"No JSON found in the response: {json_string}")
                 return {}
+
+        # Initialize results with default values
+        results = {key: {"label": False, "reason": ""} for key in self.criteria_dict.keys()}
+
+        for key in self.criteria_dict.keys():
+            if key in parsed_json:
+                criterion = parsed_json[key]
+                label = criterion.get("label", False)
+                reason = criterion.get("reason", "")
+
+                # Convert 'label' to boolean if it's a string
+                if isinstance(label, str):
+                    label_lower = label.strip().lower()
+                    if label_lower == 'true':
+                        results[key]["label"] = True
+                    elif label_lower == 'false':
+                        results[key]["label"] = False
+                    else:
+                        self.logger.warning(f"Invalid 'label' value for criterion '{key}': {label}")
+                        results[key]["label"] = False
+                elif isinstance(label, bool):
+                    results[key]["label"] = label
+                else:
+                    self.logger.warning(f"Invalid 'label' type for criterion '{key}': {label}")
+                    results[key]["label"] = False
+
+                # Validate and assign 'reason'
+                if isinstance(reason, str):
+                    results[key]["reason"] = reason.strip()
+                else:
+                    self.logger.warning(f"Invalid 'reason' type for criterion '{key}': {reason}")
+                    results[key]["reason"] = ""
+            else:
+                # If the criterion is not present in the JSON, keep default values
+                self.logger.warning(f"The criterion '{key}' was not found in the provided JSON.")
+
+        return results
 
     def prepare_screening_prompt(self):
         formatted_criteria = "\n".join(f"- {key}: {value}" for key, value in self.criteria_dict.items())
@@ -453,42 +585,113 @@ class Screening1:
         Criteria:
         {criteria}
 
+        For each criterion, provide a boolean label (True or False) and a brief reason for your decision.
+
+        **Important**: Respond **only** with a JSON object matching the following structure, and do not include any additional text:
+
+        JSON Structure:
+        {json_structure}
+
+        Please ensure that the 'label' values are boolean (True or False) without quotes.
+        """)
+
+        return prompt, formatted_criteria, json_structure
+
+    def sanitize_labels(self, answerset: dict):
+        """
+        Converts all 'label' values in the answerset to Python booleans.
+        """
+        for key, value in answerset.items():
+            if 'label' in value:
+                label = value['label']
+                if isinstance(label, str):
+                    label_lower = label.strip().lower()
+                    if label_lower == 'true':
+                        answerset[key]['label'] = True
+                    elif label_lower == 'false':
+                        answerset[key]['label'] = False
+                    else:
+                        self.logger.warning(
+                            f"Invalid 'label' value for criterion '{key}': {label}. Defaulting to False.")
+                        answerset[key]['label'] = False
+                elif isinstance(label, bool):
+                    continue  # Already a boolean
+                else:
+                    self.logger.warning(f"Invalid 'label' type for criterion '{key}': {label}. Defaulting to False.")
+                    answerset[key]['label'] = False
+        return answerset
+
+    def prepare_chain(self):
+        prompt = ChatPromptTemplate.from_template("""
+        Analyze the following scientific article and determine if it meets the specified criteria.
+        Only use the information provided in the context.
+
+        Context: {context}
+
+        Criteria:
+        {criteria}
+
         For each criterion, provide a boolean label (true if it meets the criterion, false if it doesn't)
         and a brief reason for your decision.
 
         **Important**: Respond **only** with a JSON object matching the following structure, and do not include any additional text:
 
+        JSON Structure:
         {json_structure}
 
-        Ensure your response is a valid JSON object.
+        Please output **only** the JSON response, without any additional text, explanations, or comments.
         """)
 
-        return prompt, formatted_criteria, json_structure
-
-    def prepare_chain(self, retriever, formatted_criteria, json_structure, prompt):
-        rag_chain_from_docs = (
-                RunnableParallel(
-                    {
-                        "context": lambda x: "\n\n".join(
-                            [doc.page_content for doc in retriever.invoke(x)]),
-                        "criteria": lambda x: formatted_criteria,
-                        "json_structure": lambda x: json_structure
-                    }
-                )
-                | prompt
+        chain = (
+                prompt
                 | self.llm
                 | (lambda x: self.parse_json_safely(x.content))
         )
-        chain = RunnablePassthrough() | rag_chain_from_docs
         return chain
+
+    async def process_single_record_async(self, recnumber, chain):
+        try:
+            # Fetch the document directly
+            document_row = self.literature_df[self.literature_df['uniqueid'] == recnumber]
+            if document_row.empty:
+                self.logger.error(f"No document found for record {recnumber}")
+                return recnumber, None
+            document = document_row[self.content_column].iloc[0]
+
+            # Prepare the inputs
+            inputs = {
+                "context": document,
+                "criteria": self.formatted_criteria,
+                "json_structure": self.json_structure
+            }
+
+            # Invoke the chain asynchronously
+            result = await chain.ainvoke(inputs)
+            return recnumber, result
+        except Exception as e:
+            self.logger.error(f"Error processing record {recnumber}: {str(e)}")
+            return recnumber, None
 
     def process_single_record(self, recnumber, chain):
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                # Invoke the chain with the recnumber as a string
-                result = chain.invoke(f"Analyze document {recnumber}")
+                # Fetch the document directly
+                document_row = self.literature_df[self.literature_df['uniqueid'] == recnumber]
+                if document_row.empty:
+                    self.logger.error(f"No document found for record {recnumber}")
+                    return None
+                document = document_row[self.content_column].iloc[0]
 
+                # Prepare the inputs
+                inputs = {
+                    "context": document,
+                    "criteria": self.formatted_criteria,
+                    "json_structure": self.json_structure
+                }
+
+                # Invoke the chain
+                result = chain.invoke(inputs)
                 if result and isinstance(result, dict):
                     return result
                 else:
@@ -528,47 +731,6 @@ class Screening1:
                 'filter': {'uniqueid': recnumber}
             }
         )
-
-    def docs_to_FAISS(self, docs, path_name):
-        # Ensure each document has metadata including 'uniqueid'
-        for doc in docs:
-            if 'uniqueid' not in doc.metadata:
-                doc.metadata['uniqueid'] = doc.page_content_hash  # Or assign a unique hash if no ID is provided
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=5000,
-            separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
-            chunk_overlap=400,
-        )
-        splits = text_splitter.split_documents(docs)
-
-        if self.verbose:
-            print(f"Creating FAISS index with {len(splits)} documents...")
-
-        # Embed documents in batches with progress bar
-        batch_size = 100  # Adjust based on your system's capacity
-        total_batches = len(splits) // batch_size + (1 if len(splits) % batch_size != 0 else 0)
-        embeddings = []
-        for i in tqdm(range(total_batches), desc="Embedding documents"):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, len(splits))
-            batch = splits[start_idx:end_idx]
-            texts = [doc.page_content for doc in batch]
-            try:
-                batch_embeddings = self.embeddings.embed_documents(texts)
-                embeddings.extend(batch_embeddings)
-            except Exception as e:
-                for doc in batch:
-                    self.logger.error(f"Error embedding document {doc.metadata.get('uniqueid', 'unknown')}: {e}")
-
-        # Create the FAISS index with embeddings and metadata
-        self.db = FAISS.from_documents(splits, self.embeddings)
-        self.db.save_local(path_name)
-        return self.db
-
-    def load_FAISS(self, path_name):
-        index = FAISS.load_local(path_name, self.embeddings, allow_dangerous_deserialization=True)
-        return index
 
     def structure_output(self, answerset: dict = None):
         data_dict = {}
@@ -678,6 +840,8 @@ class Screening1:
 
     def merge_results(self, df, screening_type):
         if screening_type == 'screening1':
-            return self.literature_df.merge(df, on='uniqueid', how='right')
+            merged_df = self.literature_df.merge(df, on='uniqueid', how='right')
+            merged_df.sort_values(by='uniqueid', inplace=True)  # Sort by uniqueid
+            return merged_df
         # Handle other screening types as needed
 
