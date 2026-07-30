@@ -1,7 +1,43 @@
 # Large Language Model Automation of Title and Abstract Screening in Systematic Reviews (SRs) in medicine
 
+This repository contains the code and analyses behind our PNAS paper on LLM-assisted title and abstract screening.
+
+## Citation
+
+If you use this code or build on this work, please cite:
+
+> Delgado-Chaves, F. M., Jennings, M. J., Atalaia, A., Wolff, J., Horvath, R., Mamdouh, Z. M., Baumbach, J., & Baumbach, L. (2025). Transforming literature screening: The emerging role of large language models in systematic reviews. *Proceedings of the National Academy of Sciences*, 122(2), e2411962122. https://doi.org/10.1073/pnas.2411962122
+
+```bibtex
+@article{delgadochaves2025transforming,
+  title   = {Transforming literature screening: The emerging role of large language models in systematic reviews},
+  author  = {Delgado-Chaves, Fernando M. and Jennings, Matthew J. and Atalaia, Antonio and Wolff, Justus and Horvath, Rita and Mamdouh, Zeinab M. and Baumbach, Jan and Baumbach, Linda},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume  = {122},
+  number  = {2},
+  pages   = {e2411962122},
+  year    = {2025},
+  doi     = {10.1073/pnas.2411962122},
+  url     = {https://doi.org/10.1073/pnas.2411962122}
+}
+```
+
 ## Overview
 This project focuses on the automation of title and abstract screening in systematic reviews (SRs) using Large Language Models (LLMs). We present a comprehensive approach encompassing data preparation, criteria implementation, quality assessment, and final classification analysis for the screening process.
+
+## Repository contents
+
+| Path | What it is |
+| --- | --- |
+| **`new_screener1.py`** | **Main module and entry point.** Defines the `Screening1` class, which is the screening engine used by every analysis in this repository: it takes a LangChain chat model, an embedding model, a dictionary of inclusion/exclusion criteria and a dataframe of records; embeds the records into a vector store; asks the LLM to answer each criterion per record via a structured (JSON) LangChain chain; and writes the per-criterion answers, missing records and merged results to disk. Runs are resumable (partial answers are checkpointed to pickles and re-processed), and records are screened concurrently via `asyncio`. The filename is kept as-is for continuity with the published analyses. |
+| `new_analyses/<REVIEW>/new_analysis_<REVIEW>_fixedparams.py` | Per-review driver scripts (`AI_healthcare`, `PICOS`, `PNP`) that define that review's criteria, instantiate `Screening1` once per model (OpenAI and Ollama-hosted open-weight models) and write results to `results_*` folders. These are the scripts to run to reproduce a screening. Note: they import the class as `from new_screener1_chroma import Screening1`, which reflects an earlier module name — the class now lives in `new_screener1.py`. |
+| `new_analyses/<REVIEW>/*_preprocessing.ipynb` | Notebooks that turn the raw bibliographic exports in `reviews_data/` into the `preprocessed_articles_filtered.pkl` inputs. |
+| `new_analyses/analyze_chroma_chatcosy_fixedparams.ipynb` | Cross-review analysis notebook: metrics, agreement, random-forest criterion importance and the figures. Also exported as `.html`/`.pdf`. |
+| `new_analyses/results/` | Aggregated results and plots across reviews and models. |
+| `reviews_data/` | Raw bibliographic input for the three systematic reviews used here (`AI_healthcare`, `PICOS`, `PNP`). |
+| `requirements.txt`, `environment.yml` | Pinned Python dependencies (pip and conda respectively). |
+
+Running the driver scripts requires a `.env` file (git-ignored) providing the API credentials read via `os.getenv` — `openai_api` for OpenAI, and `ollama_user` / `ollama_pw` for the authenticated Ollama endpoint.
 
 ## Data Preparation
 - **Dataset**: Started with bibliography entries from a database search, formatted to EndNote standards.
@@ -30,4 +66,3 @@ This project focuses on the automation of title and abstract screening in system
 
 ## Conclusion
 This project demonstrates the potential of LLMs in automating the initial stages of SRs, offering a structured and statistically validated approach. The integration of advanced models and analytical techniques presents a promising direction for future research in this area.
-itory.

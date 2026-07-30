@@ -30,3 +30,15 @@
 .env
 /new_screener1_FAISS.py
 .idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
