@@ -7,19 +7,21 @@ import requests, json
 from dotenv import load_dotenv
 import os
 import sys
-sys.path.append("/home/bbb1417/LLM_SR_medicine")
-from new_screener1_chroma import Screening1
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(SCRIPT_DIR))
+sys.path.append(REPO_ROOT)
+from new_screener1 import Screening1
 import pickle
 
 # screen -S llm_PNP_chroma_chatcosy python new_analysis_PNP_fixedparams.py
 
-dotenv_path = '/home/bbb1417/LLM_SR_medicine/.env'
+dotenv_path = os.environ.get("LLM_SR_ENV_FILE", os.path.join(REPO_ROOT, ".env"))
 load_dotenv(dotenv_path)
 
 # READING THE DF
-workdir = "/home/bbb1417/LLM_SR_medicine/new_analyses/PNP"
-df = pd.read_pickle(f'/home/bbb1417/LLM_SR_medicine/new_analyses/PNP/preprocessed_articles_filtered.pkl')
-output_dir = "/home/bbb1417/LLM_SR_medicine/new_analyses/PNP/results_chroma_chatcosy_fixedparams"
+workdir = SCRIPT_DIR
+df = pd.read_pickle(os.path.join(SCRIPT_DIR, "preprocessed_articles_filtered.pkl"))
+output_dir = os.path.join(SCRIPT_DIR, "results_chroma_chatcosy_fixedparams")
 
 print(df.columns)
 
@@ -72,7 +74,7 @@ for openai_model in openai_models:
     results_df.to_pickle(f'{outdir}/results_screening1.pkl')
 
 # Read a pickle file
-with open("/home/bbb1417/LLM_SR_medicine/new_analyses/ollama_model_list.pkl", 'rb') as f:
+with open(os.path.join(REPO_ROOT, "new_analyses/ollama_model_list.pkl"), 'rb') as f:
     ollama_models = pickle.load(f)
 # If you want to see what's in it
 print(ollama_models)  # If it's a list/dict it will print directly
