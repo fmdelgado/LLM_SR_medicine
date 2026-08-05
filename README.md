@@ -25,7 +25,7 @@ This is a research artifact, not a maintained product, and it reflects the state
 | Path | What it is |
 | --- | --- |
 | **`new_screener1.py`** | **Main module and entry point.** Defines the `Screening1` class, which is the screening engine used by every analysis in this repository: it takes a LangChain chat model, an embedding model, a dictionary of inclusion/exclusion criteria and a dataframe of records; embeds the records into a vector store; asks the LLM to answer each criterion per record via a structured (JSON) LangChain chain; and writes the per-criterion answers, missing records and merged results to disk. Runs are resumable (partial answers are checkpointed to pickles and re-processed), and records are screened concurrently via `asyncio`. The filename is kept as-is for continuity with the published analyses. |
-| `new_analyses/<REVIEW>/new_analysis_<REVIEW>_fixedparams.py` | Per-review driver scripts (`AI_healthcare`, `PICOS`, `PNP`) that define that review's criteria, instantiate `Screening1` once per model (OpenAI and Ollama-hosted open-weight models) and write results to `results_*` folders. These are the scripts to run to reproduce a screening. Note: they import the class as `from new_screener1_chroma import Screening1`, which reflects an earlier module name — the class now lives in `new_screener1.py`. |
+| `new_analyses/<REVIEW>/new_analysis_<REVIEW>_fixedparams.py` | Per-review driver scripts (`AI_healthcare`, `PICOS`, `PNP`) that define that review's criteria, instantiate `Screening1` once per model (OpenAI and Ollama-hosted open-weight models) and write results to `results_*` folders. These are the scripts to run to reproduce a screening. They resolve all paths relative to their own location, so they run from a fresh clone; set `LLM_SR_ENV_FILE` to point at an alternative `.env`. |
 | `new_analyses/<REVIEW>/*_preprocessing.ipynb` | Notebooks that turn the raw bibliographic exports in `reviews_data/` into the `preprocessed_articles_filtered.pkl` inputs. |
 | `new_analyses/analyze_chroma_chatcosy_fixedparams.ipynb` | Cross-review analysis notebook: metrics, agreement, random-forest criterion importance and the figures. Also exported as `.html`/`.pdf`. |
 | `new_analyses/results/` | Aggregated results and plots across reviews and models. |
@@ -61,6 +61,8 @@ Running the driver scripts requires a `.env` file (git-ignored) providing the AP
 
 ## Conclusion
 This project demonstrates the potential of LLMs in automating the initial stages of SRs, offering a structured and statistically validated approach. The integration of advanced models and analytical techniques presents a promising direction for future research in this area.
+
+> **Note on `new_analyses/analyze_chroma_chatcosy_fixedparams.ipynb`:** this notebook is kept as the original analysis record and still contains the absolute paths of the machine it was executed on. The per-review driver scripts, not this notebook, are the reproducible entry points.
 
 ## Citation
 
